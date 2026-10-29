@@ -1,0 +1,429 @@
+# -*- coding: utf-8 -*-
+"""사람용 페이지를 만든다.   python3 bench/make_human.py [문제수=10] [씨앗=1028] [--folder 폴더] [--runs 런,런,…]
+
+기본은 이 폴더(`bingo-lights`)이고 `--folder` 로 다른 폴더를 줄 수 있다. 그 폴더의 episodes/episodes.json 에서 문제를
+씨앗으로 뽑아 `<폴더>/human/<폴더 이름>.html` 하나에 구워 넣는다. `forbidden`(켜기 금지 전구 번호)은 규칙
+dict(kind="on")로 바꿔 같은 판정을 쓴다. 지금 페이지(`human/bingo-lights.html`)는 모델 실행 기록(저장소에는 없음)으로
+층을 나눠 뽑은 열 문제다(Q006 Q032 Q040 Q056 Q059 Q062 Q067 Q077 Q083 Q099).
+    python3 bench/make_human.py 10 1028 --runs 20261028_125142,20261029_073628,20261028_130536,20261029_073633,20261028_130546,20261029_073638
+
+모델과 같은 문제 · 같은 예산 · 같은 피드백으로 맞춘다 — `water-pipes/bench/make_human.py` 를 따랐다.
+  · 숨은 것(어느 줄이 목표인지 · 규칙)도, 라운드 전환도 알리지 않는다. 둘이 '있다' 는 것만 모델의 글과 같은 뜻으로 알린다
+  · 예산 T · k 도 알리지 않는다. 라운드마다 T 번 안에 연속 k 번 맞혀야 넘어가고, 못 넘어가면 그 문제는 끝난다
+  · 판정은 모델이 받는 글과 같은 내용만 — 완성된 줄, 정답 여부, 틀린 전구(목표 오류와 규칙 위반을 가리지 않음)
+  · 배선표(버튼이 하는 일)는 늘 보인다. 라운드가 바뀌면 말없이 바뀐다. 모델도 매 질문 앞에 지금 배선표를 받는다
+  · 버튼을 누를 때마다 전구판이 그 순서대로 바뀌어 보이고, 누른 순서 아래에 누를 때마다의 작은 판이 남는다 — 모델은
+    배선표로 이것을 정확히 계산할 수 있으니, 사람에게 안 보여 주면 적응이 아니라 머릿속 계산 능력을 재게 된다
+메모장은 모델의 추론 자리라 남겨 두되 채점에는 쓰지 않는다. 결과 JSON 은 `bench/human_runs.py` 로 runs 꼴로 펼쳐
+그 버전의 `bench/score.py` 로 채점한다.
+
+`--runs` 를 주면(그 버전의 runs 폴더 이름을 쉼표로) 모델 런이 있는 문제에서만, **1 라운드를 푼 모델 수로 층을 나눠** 층
+크기에 비례해 뽑는다(`물길-세축/bench/make_human.py` 와 같은 방식) — 사람과 모델을 같은 문제로 견주고, 표본의 난이도가
+모델 결과 전체와 같은 분포가 되게. 어느줄4 는 Q001~Q100 세 모델 런으로 뽑는다(R1 을 푼 모델 1 · 2 · 3 개가 4 · 25 · 71 문제 →
+열 문제 몫 0 · 3 · 7). 주지 않으면 전체 문제에서 그냥 뽑는다.
+"""
+import base64
+import json
+import random
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ROOT = Path(sys.argv[sys.argv.index("--folder") + 1]).resolve() if "--folder" in sys.argv else HERE
+if "--folder" in sys.argv:
+    args.remove(sys.argv[sys.argv.index("--folder") + 1])
+N = int(args[0]) if args else 10
+SEED = int(args[1]) if len(args) > 1 else 1028
+T, K = 10, 2                                          # runner 기본값과 같다
+
+
+def rule_of(r):
+    if "rule" in r and isinstance(r["rule"], dict):
+        return dict(kind=r["rule"]["kind"], a=r["rule"]["a"], b=r["rule"].get("b"))
+    return dict(kind="on", a=r["forbidden"], b=None)
+
+
+RUNS = sys.argv[sys.argv.index("--runs") + 1].split(",") if "--runs" in sys.argv else []
+if RUNS:
+    args.remove(sys.argv[sys.argv.index("--runs") + 1])
+
+
+def r1_solved():
+    """문제마다 1 라운드를 푼 모델 수(주어진 런 전체). 모든 런에 있는 문제만."""
+    got, seen = {}, {}
+    for run in RUNS:
+        for f in (ROOT / "runs" / run).glob("*.json"):
+            if f.name == "index.json":
+                continue
+            log = json.loads(f.read_text())
+            model = json.loads((ROOT / "runs" / run / "index.json").read_text())["model"]
+            seen.setdefault(log["episode"], set()).add(model)
+            got[log["episode"]] = got.get(log["episode"], 0) + bool(log["rounds"][0]["solved"])
+    models = {json.loads((ROOT / "runs" / r / "index.json").read_text())["model"] for r in RUNS}
+    return {e: n for e, n in got.items() if seen[e] == models}
+
+
+def quota(layers, n, total):
+    """층 크기에 비례한 몫(최대 나머지 방식)."""
+    q = {k: n * len(v) / total for k, v in layers.items()}
+    take = {k: int(x) for k, x in q.items()}
+    for k in sorted(q, key=lambda k: q[k] - take[k], reverse=True)[:n - sum(take.values())]:
+        take[k] += 1
+    return take
+
+
+everything = json.loads((ROOT / "episodes/episodes.json").read_text())
+rng = random.Random(SEED)
+if RUNS:
+    solved = r1_solved()
+    layers = {}
+    for i, e in enumerate(everything):
+        if e["id"] in solved:
+            layers.setdefault(solved[e["id"]], []).append(i)
+    take = quota(layers, N, sum(len(v) for v in layers.values()))
+    picked = sorted(i for k in sorted(layers) for i in rng.sample(layers[k], take[k]))
+    print("  층(R1 을 푼 모델 수: 문제 수 → 몫) " + "  ".join(f"{k}: {len(layers[k])} → {take[k]}" for k in sorted(layers)))
+else:
+    picked = sorted(rng.sample(range(len(everything)), min(N, len(everything))))
+eps = [dict(id=e["id"], rounds=[dict(round=r["round"], table=r["table"], goal=r["goal"], rule=rule_of(r))
+                                for r in e["rounds"]])
+       for e in (everything[i] for i in picked)]
+CFG = json.dumps(dict(T=T, k=K, seed=SEED, sample=[e["id"] for e in eps], version=ROOT.name,
+                      **({"runs": RUNS} if RUNS else {})), ensure_ascii=False)
+DATA = base64.b64encode(json.dumps(eps).encode()).decode()     # 목표 · 규칙이 소스에 그대로 보이지 않게
+
+HTML = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>빙고 전구</title>
+<style>
+ :root{color-scheme:light}
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif;
+      background:#f5f5f7;color:#1a1a1a;margin:0;padding:22px;line-height:1.55}
+ .wrap{max-width:1040px;margin:0 auto}
+ .cols{display:flex;gap:16px;align-items:flex-start}
+ .mid{flex:1 1 0;min-width:0}
+ .side{flex:0 0 322px}
+ .side .card{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto}
+ @media (max-width:820px){.cols{flex-direction:column}.side{flex:none;width:100%}}
+ h1{font-size:19px;margin:0 0 14px}
+ .card{background:#fff;border:1px solid #e3e3e3;border-radius:12px;padding:20px;margin-bottom:16px}
+ .muted{color:#777;font-size:13px}
+ .prog{display:flex;gap:5px;margin:0 0 14px}
+ .seg{flex:1 1 0;height:8px;background:#e2e2e2;border-radius:4px}
+ .seg.on{background:#1a1a1a}
+
+ .play{display:flex;gap:26px;align-items:flex-start;justify-content:center;flex-wrap:wrap;margin-top:12px}
+ .grid svg{display:block}
+ .btns{display:flex;flex-direction:column;gap:9px;min-width:280px}
+ .bt{display:flex;align-items:center;gap:12px;text-align:left}
+ .bt .k{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;
+        background:#1a1a1a;color:#fff;font-weight:800;font-size:16px;flex:0 0 34px}
+ .bt .e{font-weight:600;font-size:14px;color:#333}
+ .bt .e i{font-style:normal;color:#8a8f94;font-weight:600}
+
+ button{font:inherit;cursor:pointer;font-weight:700;padding:9px 14px;line-height:1.3;
+        background:linear-gradient(#ffffff,#eceef0);border:1px solid #bcc0c4;
+        border-bottom:4px solid #aeb3b8;border-radius:12px;color:#1a1a1a;
+        box-shadow:0 3px 7px rgba(0,0,0,.10);transition:transform .05s,box-shadow .05s}
+ button:hover{background:linear-gradient(#ffffff,#e4e7ea)}
+ button:active{transform:translateY(3px);border-bottom-width:1px;box-shadow:inset 0 3px 6px rgba(0,0,0,.14)}
+ .go{background:linear-gradient(#2c2c2c,#141414);color:#fff;border-color:#141414;
+     border-bottom:4px solid #000;padding:12px 26px;letter-spacing:2px}
+ .go:hover{background:linear-gradient(#3a3a3a,#1e1e1e)}
+ .seqbar{display:flex;gap:10px;align-items:center;justify-content:center;margin:18px 0 2px;flex-wrap:wrap}
+ .seq{flex:0 0 auto;width:420px;max-width:100%;min-height:74px;border:2px dashed #c3c3c3;border-radius:11px;
+      padding:6px 10px;background:#fafafa;display:flex;align-items:center;justify-content:center}
+ .seq.empty{color:#bbb;font-size:13px}
+ .steps{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+ .step{display:flex;flex-direction:column;align-items:center;gap:2px}
+ .step b{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:22px;padding:0 5px;
+         border-radius:6px;background:#eef0f2;border:1px solid #d9dde1;font-size:13px;font-weight:800;color:#2a2a2a}
+ .vd{font-weight:800;font-size:14px;min-height:44px;text-align:center;margin-top:10px}
+ .vd .w{display:block;font-weight:600;color:#444}
+ .vd.o .v{color:#1f7a3f}
+ .vd.x .v{color:#b04040}
+
+ .row{padding:9px 4px;border-bottom:1px solid #f1f1f1}
+ .row .top{font-size:12px;font-weight:700}
+ .row .top .o{color:#1f7a3f}
+ .row .top .x{color:#b04040}
+ .row .steps{justify-content:flex-start;margin-top:4px}
+ .row .step b{min-width:21px;height:20px;font-size:12px}
+
+ textarea{width:100%;min-height:72px;font:inherit;font-size:13px;padding:10px;
+          border:1px solid #ddd;border-radius:8px;resize:vertical}
+ input{font:inherit;padding:9px 12px;border:1px solid #ccc;border-radius:8px;width:240px}
+ .toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:50;background:#1a1a1a;
+        color:#fff;font-size:17px;font-weight:800;padding:12px 26px;border-radius:999px;
+        opacity:0;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+ .toast.go2{animation:pop 1.4s ease-out}
+ @keyframes pop{0%{opacity:0}15%{opacity:1}75%{opacity:1}100%{opacity:0}}
+</style></head><body>
+<div class="wrap">
+ <div id="toast" class="toast"></div>
+
+ <div id="intro" class="card">
+  <h1>빙고 전구</h1>
+  <p>이 퍼즐은 조금 특이합니다. 푸는 방법을 많이 알려 드릴 수 없습니다.</p>
+  <p>전구 아홉 개가 3 × 3 으로 놓여 있고, 번호는 왼쪽 위부터 1~9 입니다. 버튼을 눌러 <b>맞는 빙고 줄</b>을 켜세요.
+     빙고 줄은 가로 · 세로 · 대각선으로 세 전구가 모두 켜진 줄이고, 1-5-9 처럼 전구 번호로 부릅니다.</p>
+  <ul class="muted" style="padding-left:20px">
+   <li>버튼마다 몇 전구를 켜고, 몇 전구를 끄고, 나머지는 그대로 둡니다. 버튼이 하는 일은 버튼 옆에 적혀 있습니다.</li>
+   <li>매 시도는 <b>모든 전구가 꺼진 상태</b>에서 시작합니다. 누를 버튼의 순서를 통째로 제출합니다.
+       같은 버튼을 여러 번 눌러도 됩니다.</li>
+   <li>제출 전까지 전구판은 지금까지 누른 순서대로 켜고 끈 모습입니다. 누른 순서 아래의 작은 판은 누를 때마다의 모습입니다.</li>
+   <li><b>맞는 줄을 켜는 것만으로는 충분하지 않습니다.</b> 어느 줄이 필요한지, 어떤 순서가 받아들여지는지는 알려 드릴 수
+       없지만, 맞았는지 틀렸는지는 매번 알려 드립니다. 통하는 순서는 늘 있습니다.</li>
+   <li>시간 제한은 없습니다. 문제는 모두 __N__개입니다.</li>
+  </ul>
+  <p style="margin-bottom:6px">이름 또는 식별자</p>
+  <input id="who">
+  <button class="go" style="margin-left:8px" onclick="start()">시작</button>
+ </div>
+
+ <div id="game" style="display:none">
+  <div class="prog" id="prog"></div>
+  <div class="cols"><div class="mid">
+  <div class="card">
+   <div class="muted" id="head"></div>
+   <div class="play">
+    <div class="grid" id="grid"></div>
+    <div class="btns" id="btns"></div>
+   </div>
+   <div class="vd" id="vd"></div>
+   <div class="seqbar">
+    <div class="seq empty" id="seq">버튼을 눌러 순서를 만드세요</div>
+    <button onclick="undo()">⌫</button>
+    <button onclick="clr()">지우기</button>
+    <button class="go" onclick="submit()">제출</button>
+   </div>
+  </div>
+  <div class="card">
+   <div class="muted" style="font-weight:700;margin-bottom:6px">메모 (채점에 쓰이지 않습니다)</div>
+   <textarea id="memo" placeholder="알아낸 것을 적어 두셔도 됩니다"></textarea>
+  </div>
+  </div>
+  <div class="side"><div class="card">
+   <div class="muted" style="font-weight:700">이 문제의 기록</div>
+   <div id="log"></div>
+   <button style="margin-top:14px;font-size:12px;padding:6px 10px;border-bottom-width:2px"
+           onclick="save()">중간에 그만둘 때: 지금까지 결과 내려받기</button>
+  </div></div>
+  </div>
+ </div>
+
+ <div id="done" class="card" style="display:none">
+  <h1>끝났습니다</h1>
+  <p>아래 버튼으로 결과 파일을 내려받아 전달해 주세요.</p>
+  <button class="go" onclick="save()">결과 내려받기</button>
+ </div>
+</div>
+<script>
+const EPS = JSON.parse(atob("__DATA__")), CFG = __CFG__;   // 페이지 소스에서 답이 바로 읽히지 않게
+const LINES=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const NAMES=LINES.map(l=>l.map(c=>c+1).join("-")), LETTERS="ABCDEFGH";
+let who="", ei=0, ri=0, seq=[], out=[], log=null, t0=0, streak=0, subs=0, busy=false, prevSuccess=null;
+
+const ep=()=>EPS[ei], rd=()=>ep().rounds[ri], tb=()=>rd().table;
+const same=(a,b)=>a.length===b.length && a.every((x,i)=>x===b[i]);
+
+/* bench/engine 의 apply_press · trace · lines · need · off_goal · culprits · evaluate 와 같다 */
+function press(st,row){ return st.map((s,i)=>row[i]==="ON"?1:(row[i]==="OFF"?0:s)); }
+function trace(table,presses){ let st=Array(9).fill(0); const out=[]; for(const b of presses){ st=press(st,table[b]); out.push(st); } return out; }
+function run(table,presses){ const t=trace(table,presses); return t.length?t[t.length-1]:Array(9).fill(0); }
+function lines(st){ return LINES.map((l,i)=>l.every(c=>st[c])?i:-1).filter(i=>i>=0); }
+function need(goal){ const s=new Set(); goal.forEach(i=>LINES[i].forEach(c=>s.add(c))); return s; }
+function offGoal(st,goal){
+  const want=need(goal), bad=new Set([...want].filter(c=>!st[c]));
+  lines(st).forEach(i=>{ if(!goal.includes(i)) LINES[i].forEach(c=>{ if(!want.has(c)) bad.add(c); }); });
+  return [...bad].sort((x,y)=>x-y);
+}
+function culprits(rule,table,presses){
+  const k=rule.kind, a=rule.a, b=rule.b, bad=new Set(), ever=new Set();
+  let prev=Array(9).fill(0);
+  for(const st of trace(table,presses)){
+    if(k==="on" && st[a]) bad.add(a);
+    else if(k==="on2"){ if(st[a]) bad.add(a); if(st[b]) bad.add(b); }
+    else if(k==="off" && prev[a] && !st[a]) bad.add(a);
+    else if(k==="pair" && st[a] && st[b]){ bad.add(a); bad.add(b); }
+    else if(k==="order" && st[b] && !prev[b] && !ever.has(a) && !st[a]) bad.add(b);
+    st.forEach((v,i)=>{ if(v) ever.add(i); });
+    prev=st;
+  }
+  return bad;
+}
+function evaluate(table,goal,rule,presses){
+  const got=run(table,presses), wrong=offGoal(got,goal), bad=culprits(rule,table,presses);
+  const flagged=[...new Set([...wrong,...bad])].sort((x,y)=>x-y);
+  let status;
+  if(!presses.length) status="empty";
+  else if(!wrong.length && !bad.size) status="solved";
+  else status = !wrong.length ? "rule" : (bad.size ? "both" : "goal");
+  return {ok:status==="solved", status, lines:lines(got), flagged, result:got};
+}
+const keptOld=(prevRule,rule,table,presses)=>!culprits(prevRule,table,presses).size && culprits(rule,table,presses).size>0;
+
+function start(){
+  who=document.getElementById("who").value.trim();
+  if(!who){ alert("이름 또는 식별자를 적어 주세요"); return; }
+  document.getElementById("intro").style.display="none";
+  document.getElementById("game").style.display="";
+  openEpisode();
+}
+
+function openEpisode(){
+  const e=ep();
+  log={episode:e.id, buttons:e.rounds[0].table.length, T:CFG.T, T1:CFG.T, k:CFG.k, rounds:[], calls:[],
+       startedAt:new Date().toISOString(), memo:""};
+  out.push(log);
+  ri=0; prevSuccess=null;
+  document.getElementById("memo").value="";
+  document.getElementById("prog").innerHTML=EPS.map((_,i)=>`<div class="seg ${i<=ei?"on":""}"></div>`).join("");
+  document.getElementById("head").textContent=`문제 ${ei+1} / ${EPS.length}`;
+  document.getElementById("log").innerHTML="";
+  say(null);
+  openRound();
+}
+
+/* 새 라운드는 말없이 연다 — 직전 판정 글은 그대로 두고 배선만 바뀐다. 모델도 'That is the answer.' 다음에
+   새 배선표를 받을 뿐이다. */
+function openRound(){
+  log.rounds.push({round:ri+1, submissions:0, solved:false, unparsed:0, streak:0, persev:0, repeat:0});
+  subs=0; streak=0; t0=Date.now(); seq=[]; paint();
+}
+
+/* 전구판 — 발표 자료의 전구 그림처럼 켜진 전구는 노랑, 꺼진 전구는 회색, 틀린 전구는 빨간 테두리 */
+const COL={on:"#F5C518", onLine:"#C99A06", off:"#E4E7EB", offLine:"#B8BEC6", num:"#6B7785", red:"#C64343", ring:"#F5C518"};
+function gridSVG(st, size, flagged, lit){
+  const g=size*.06, c=(size-g*2)/3, r=c*.36;
+  let s=`<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="전구판">`;
+  for(let i=0;i<9;i++){
+    const cx=(i%3)*(c+g)+c/2, cy=Math.floor(i/3)*(c+g)+c/2, on=st[i];
+    s+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="${on?COL.on:COL.off}" stroke="${on?COL.onLine:COL.offLine}" stroke-width="${size>100?2:1}"/>`;
+    if(!on && lit && lit.has(i)) s+=`<circle cx="${cx}" cy="${cy}" r="${r*.62}" fill="none" stroke="${COL.ring}" stroke-width="${size>100?3:1.5}"/>`;
+    if(flagged && flagged.includes(i)) s+=`<circle cx="${cx}" cy="${cy}" r="${r+ (size>100?6:2.5)}" fill="none" stroke="${COL.red}" stroke-width="${size>100?3:1.6}"/>`;
+    if(size>100) s+=`<text x="${cx}" y="${cy+5}" text-anchor="middle" font-size="${c*.22}" font-weight="700" fill="${on?"#5a4300":COL.num}">${i+1}</text>`;
+  }
+  return s+"</svg>";
+}
+function effect(row){
+  const on=[], off=[];
+  row.forEach((e,i)=>{ if(e==="ON") on.push(i+1); else if(e==="OFF") off.push(i+1); });
+  return `켬 ${on.join(" ")}`+(off.length?` <i>· 끔 ${off.join(" ")}</i>`:"");
+}
+
+/* 판을 그린다. 지금 만든 순서까지 누른 모습이고, 도중에 켜졌다 꺼진 전구는 노란 고리로 남긴다 */
+function paint(flagged){
+  const t=tb(), states=trace(t,seq), st=states.length?states[states.length-1]:Array(9).fill(0);
+  const lit=new Set(); states.forEach(s=>s.forEach((v,i)=>{ if(v) lit.add(i); }));
+  document.getElementById("grid").innerHTML=gridSVG(st, 300, flagged, lit);
+  document.getElementById("btns").innerHTML=t.map((row,b)=>
+    `<button class="bt" onclick="tap(${b})"><span class="k">${LETTERS[b]}</span><span class="e">${effect(row)}</span></button>`).join("");
+  const el=document.getElementById("seq");
+  el.className="seq"+(seq.length?"":" empty");
+  el.innerHTML=seq.length ? `<span class="steps">${seq.map((b,k)=>
+      `<span class="step"><b>${LETTERS[b]}</b>${gridSVG(states[k], 40)}</span>`).join("")}</span>`
+    : "버튼을 눌러 순서를 만드세요";
+}
+
+function tap(b){ if(busy) return; seq.push(b); paint(); }
+function undo(){ if(busy) return; seq.pop(); paint(); }
+function clr(){ if(busy) return; seq=[]; paint(); }
+
+/* 모델이 받는 글과 같은 내용 — 완성된 줄, 정답 여부, 틀린 전구 */
+const linesText=l=>"완성된 줄: "+(l.length ? l.map(i=>NAMES[i]).join(" · ") : "없음");
+const verdictText=res=>res.ok ? "정답입니다"
+  : (res.flagged.length ? `틀린 전구 ${res.flagged.map(i=>i+1).join(" ")}. 정답이 아닙니다` : "정답이 아닙니다");
+function say(res){
+  const vd=document.getElementById("vd");
+  if(!res){ vd.className="vd"; vd.innerHTML=""; return; }
+  vd.className="vd "+(res.ok?"o":"x");
+  vd.innerHTML=`<span class="w">${linesText(res.lines)}</span><span class="v">${verdictText(res)}</span>`;
+}
+
+function submit(){
+  if(busy || !seq.length) return;
+  const e=ep(), r=rd(), presses=seq.slice();
+  const res=evaluate(r.table, r.goal, r.rule, presses);
+  const rec=log.rounds[ri];
+  rec.submissions++; subs++;
+  const call={round:ri+1, submission:rec.submissions, presses, status:res.status, correct:res.ok,
+              lines:res.lines, flagged:res.flagged, result:res.result,
+              api:{provider:"human", participant:who, secs:(Date.now()-t0)/1000}};
+  if(!res.ok && ri){                // runner.play 의 깃발과 같다 — 배선은 지금 것
+    const hits={persev:keptOld(e.rounds[ri-1].rule, r.rule, r.table, presses),
+                repeat:prevSuccess!==null && same(presses, prevSuccess)};
+    for(const [k,hit] of Object.entries(hits)) if(hit){ rec[k]++; call[k]=true; }
+  }
+  log.calls.push(call);
+  t0=Date.now();
+  say(res);
+  paint(res.ok ? null : res.flagged);
+
+  const row=document.createElement("div");
+  row.className="row";
+  row.innerHTML=`<div class="top"><span class="${res.ok?"o":"x"}">${verdictText(res)}</span></div>`
+    + `<div class="muted">${linesText(res.lines)}</div>`
+    + `<div class="steps">${presses.map(b=>`<span class="step"><b>${LETTERS[b]}</b></span>`).join("")}</div>`;
+  const lg=document.getElementById("log");
+  lg.appendChild(row); row.scrollIntoView({block:"nearest"});
+
+  streak = res.ok ? streak+1 : 0;
+  busy=true;
+  if(res.ok && streak>=CFG.k){
+    rec.solved=true; rec.streak=streak; rec.solution=presses; prevSuccess=presses;
+    // 라운드가 끝난 것을 알리지 않는다. 모델도 통보받지 않고 다음 질문에 새 배선표만 받는다.
+    setTimeout(()=>{ busy=false; nextRound(); }, 900);
+  } else if(subs>=CFG.T){
+    rec.budgetExhausted=true;
+    log.status = ri===0 ? "round1_unsolved" : `stopped_round${ri+1}`;
+    setTimeout(()=>{ busy=false; nextEpisode(); }, 1200);
+  } else {
+    setTimeout(()=>{ busy=false; seq=[]; paint(res.ok ? null : res.flagged); }, 700);
+  }
+}
+
+function nextRound(){
+  ri++;
+  if(ri>=ep().rounds.length){ log.status="completed"; nextEpisode(); return; }
+  openRound();
+}
+
+function nextEpisode(){
+  log.memo=document.getElementById("memo").value;
+  ei++;
+  if(ei>=EPS.length){
+    document.getElementById("game").style.display="none";
+    document.getElementById("done").style.display="";
+    return;
+  }
+  toast(`문제 ${ei+1} 시작`);       // 모델도 문제마다 대화를 새로 연다
+  openEpisode();
+}
+
+function toast(t){
+  const el=document.getElementById("toast");
+  el.textContent=t; el.className="toast"; void el.offsetWidth; el.className="toast go2";
+}
+
+function save(){
+  if(log && ei<EPS.length) log.memo=document.getElementById("memo").value;
+  const blob=new Blob([JSON.stringify({name:who, finishedAt:new Date().toISOString(), config:CFG, sessions:out},
+                                      null, 1)], {type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`전구_사람_${who}.json`;
+  a.click();
+}
+</script></body></html>
+"""
+
+(ROOT / "human").mkdir(exist_ok=True)
+page = ROOT / "human" / f"{ROOT.name}.html"           # human/bingo-lights.html
+page.write_text(HTML.replace("__DATA__", DATA).replace("__CFG__", CFG).replace("__N__", str(len(eps))))
+print(page)
+print(f"  {ROOT.name} 문제 {len(eps)} 개 (씨앗 {SEED}): " + " ".join(e["id"] for e in eps) + f" · T={T} k={K}")
+print(f"  열기: open {page}")
