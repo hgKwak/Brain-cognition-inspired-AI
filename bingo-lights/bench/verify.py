@@ -9,12 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import engine as E                                    # noqa: E402
-from generate import CHANGE, COUPLE, change           # noqa: E402
+from generate import CHANGE, COUPLE, SHARE, change    # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 eps = json.loads((ROOT / "episodes/episodes.json").read_text())
-SEQS = E.sequences(5, 4)
+assert len({e['buttons'] for e in eps}) == 1
+SEQS = E.sequences(eps[0]['buttons'], 4)
 bad, chk, kinds = [], Counter(), Counter()
+shares = []
 R = n = n2 = 0
 
 
@@ -112,6 +114,10 @@ for e in eps:
         ok("첫 제출이 꺼진 목표 전구를 켰다 끄지 않음",
            not any(E.touches(t, q, c) and not E.run(t, q)[c] for q in first for c in E.need(g)),
            "첫 제출 후보가 끝에 꺼진 목표 전구를 누르는 도중 켬")
+        ex3 = [q for q in now if len(q) <= 3]
+        share = sum(not E.touches(t, q, Lp) for q in ex3) / len(ex3)
+        shares.append(share)
+        ok("새 목표 답의 1/3 넘게가 옛 금지를 피함", share > SHARE, f"새 목표 답 가운데 옛 금지를 피하는 몫이 {share:.2f}")
 
 print(f"에피소드 {len(eps)} · 라운드 {R} · 전환 {n}")
 for k in ("정답이 통함", "정답 3번 이하", "목표는 한두 줄", "금지 전구는 목표 줄 밖"):
@@ -123,9 +129,11 @@ for k in ("조건 변경(배선 네 칸)", "규칙 변경", "목표 변경", "�
           "직전 정답 그대로 → 지속적 오류", "기본 최단은 모두 직전 금지 전구를 켬", "직전 금지를 켜는 버튼 둘 이상",
           "옛 금지를 지켜도 끝 판 고치기 가능", "바뀌는 방식이 뺌 · 더함 중 하나",
           "기본 최단은 모두 지금 금지 전구를 안 켬", "옛 목표 답 절반 이상이 옛 금지를 피함",
-          "첫 제출이 꺼진 목표 전구를 켰다 끄지 않음", "직전 정답 무엇을 되풀이해도 지속적 오류"):
+          "첫 제출이 꺼진 목표 전구를 켰다 끄지 않음", "직전 정답 무엇을 되풀이해도 지속적 오류",
+          "새 목표 답의 1/3 넘게가 옛 금지를 피함"):
     print(f"  {k:30} {chk[k]}/{n}" + ("" if chk[k] == n else "   ← 어긋남"))
 for k in ("두 라운드 전 금지와도 다름", "두 라운드 전 정답은 지금 틀림"):
     print(f"  {k:30} {chk[k]}/{n2}" + ("" if chk[k] == n2 else "   ← 어긋남"))
 print(f"  바뀌는 방식 {dict(kinds)}")
+print(f"  새 목표 답 가운데 옛 금지를 피하는 몫 평균 {sum(shares) / len(shares):.2f}, 가장 작은 값 {min(shares):.2f}")
 print("  문제 없음" if not bad else "  " + "\n  ".join(bad[:20]))

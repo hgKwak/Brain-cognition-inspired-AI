@@ -1,6 +1,22 @@
 # -*- coding: utf-8 -*-
 """3×3 빙고 전구 5라운드 에피소드 — 목표는 어느 줄, 규칙은 금지 전구.   python3 bench/generate.py [개수] [시드] [병렬 수]
 
+v1.1(2026-11-05): 버튼을 다섯에서 여섯으로 늘리고 생성 보장 하나를 더했다. 문제 번호 X001~.
+
+  6  전환 라운드에서 새 목표를 만드는 3번 이하 답 가운데 직전 금지 전구를 피하는 답이 1/3을 넘는다.
+     줄 0 보장 때문에 직전 금지를 피한 답은 지금 금지를 켠다 — 새 목표를 맞히려는 답이 지속적 오류가 되기 쉽다.
+
+왜 — v1.0(Q001~Q100)과 그 이전 판(S001~S100)의 실행 기록에서 이 조건을 이미 만족한 라운드의 지속적 오류율이
+GPT 50.0 · Opus 46.3 · Sonnet 41.9%(19 · 22 · 23 라운드), 나머지는 43.8 · 39.0 · 37.7% 였다. 우연 기준은 오히려 낮았다.
+
+찾기 — 만족하는 배선이 드물어 2라운드를 찾은 뒤에는 라운드마다 DEEP 번까지 보고 한 번에 BUDGET 번까지 쓴다.
+보장 5에서 배선만 보고 알 수 있는 부분은 survey 앞에서 먼저 본다. 찾는 순서만 바꾸는 것이고 보장은 그대로다.
+**문제는 이 파이썬 판이 아니라 C 판으로 만든다**: `python3 bench/fastgen_run.py 300 20261105 8`(`bench/fastgen.c`, 같은 보장,
+난수가 달라 같은 문제는 나오지 않음). 파이썬 판으로는 8코어 30분에 2문제였고, C 판으로는 30문제가 4코어 167초였다.
+검사는 `bench/verify.py` 가 생성기의 판단을 쓰지 않고 엔진으로 처음부터 다시 한다.
+
+아래는 v1.0(버튼 5개, 문제 번호 Q)의 머리말이다.
+
 `전구-빙고-어느줄3` 과 판 · 판정 · 글이 같고 전환 라운드 보장 다섯을 더했다(사용자: "만들어", 2026-10-28). 배선은
 매 라운드 **네 칸** 바뀐다(어느줄3 은 두 칸).
 어느줄3 S001~S100 에서 Claude 는 37.9 · 37.8% 였는데, 옛 규칙을 전혀 붙들지 않는 가상 모델(첫 제출은 직전 정답,
@@ -98,7 +114,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import engine as E                                    # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-BUTTONS, ROUNDS, CHANGE = 5, 5, 4                     # 배선은 매 라운드 네 칸(어느줄3 은 두 칸)
+BUTTONS, ROUNDS, CHANGE = 6, 5, 4                     # 배선은 매 라운드 네 칸(어느줄3 은 두 칸)
 SEQS = E.sequences(BUTTONS, 4)
 GOALS = {1: [(i,) for i in range(len(E.LINES))],
          2: list(combinations(range(len(E.LINES)), 2))}
@@ -107,6 +123,9 @@ NATURAL = True                                         # 2 규칙 없이 가장 
 LOOKALIKE = True                                       # 3 첫 제출이 끝에 꺼진 T 전구를 도중에 켜지 않는다
 COUPLE = 1 / 2                                         # 4 옛 목표 답 가운데 L' 을 안 켜는 몫의 하한
 REPEAT_ALL = True                                      # 5 직전 라운드 정답(3 번 이하) 전부가 L' 을 안 켜고 L 을 켠다
+SHARE = 1 / 3                                          # 6 새 목표 답 가운데 L' 을 안 켜는 몫이 이것을 넘는다
+DEEP, BUDGET = 20000, 200000                           # 2 라운드를 찾은 뒤 라운드당 · 한 번에 볼 배선 수
+PREFIX = "X"                                           # 문제 번호 X001~
 
 
 def change(T, Tp):
@@ -219,6 +238,19 @@ def one_round(rng, table, rounds, solved, size=None, kind=None):
     back = rounds[-2]["forbidden"] if len(rounds) >= 2 else None
     if prev is not None and len(E.lighting(table, prev["forbidden"])) < 2:
         return None                                        # 직전 금지 전구를 켜는 버튼은 둘 이상
+    if prev is not None:                                   # 5 의 앞부분 — 배선만 보고 알 수 있으니 survey 앞에서 본다
+        on = [sum(1 << c for c, e in enumerate(row) if e == E.ON) for row in table]
+        common = (1 << E.CELLS) - 1
+        for p in solved[-1]:
+            if len(p) <= 3:
+                m = 0
+                for b in p:
+                    m |= on[b]
+                if m >> prev["forbidden"] & 1:
+                    return None
+                common &= m
+        if not common:
+            return None
     info = survey(table)
     by = defaultdict(list)
     for p, (done, _, _) in info.items():
@@ -245,7 +277,12 @@ def one_round(rng, table, rounds, solved, size=None, kind=None):
         dflt = shortest(nline)
         if prev is not None:
             Lp = prev["forbidden"]
-            if Lp in want or not all(lit(p, Lp) for p in dflt) or blocked(info, nline, Lp, want):
+            if Lp in want or not all(lit(p, Lp) for p in dflt):
+                continue
+            ex3 = [p for p in nline if len(p) <= 3]        # 6 새 목표 답의 1/3 넘게가 옛 금지를 피함
+            if sum(not lit(p, Lp) for p in ex3) <= SHARE * len(ex3):
+                continue
+            if blocked(info, nline, Lp, want):
                 continue
             wbits = sum(1 << c for c in want)              # 3 첫 제출이 끝에 꺼진 목표 전구를 도중에 켜지 않음
             H = [p for p in by.get(tuple(prev["goal"]), []) if len(p) <= 3 and not lit(p, Lp)]
@@ -283,7 +320,7 @@ def one_round(rng, table, rounds, solved, size=None, kind=None):
     return None
 
 
-def make(rng, tries=1500, budget=20000, how=None):
+def make(rng, tries=1500, budget=BUDGET, how=None):
     """다섯 라운드를 되짚어 가며 찾는다. 막힘 없음 보장을 넣고 한 라운드씩 앞으로만 가면 에피소드가 나오지
     않았다(라운드당 400 번 666 회 · 2000 번 93 회 모두 0) — 통과하는 배선이 드물고(섭동의 0.13%), 통과한
     배선이 다음 라운드에도 통과 배선을 낳을 확률이 12% 안팎이다. 다음 라운드가 막히면 이 라운드의 다른
@@ -295,7 +332,7 @@ def make(rng, tries=1500, budget=20000, how=None):
     def grow(rounds, solved):
         if len(rounds) == ROUNDS:
             return rounds
-        for _ in range(tries if rounds else 1):
+        for _ in range((tries if len(rounds) == 1 else DEEP) if rounds else 1):
             if left[0] <= 0:
                 return None
             left[0] -= 1
@@ -356,7 +393,7 @@ def main(count=300, seed=20261028, jobs=8):
         k = 0
         while k in done:
             k += 1
-        eps = [dict(id=f"Q{i + 1:03d}", buttons=BUTTONS, rounds=done[i]) for i in range(k)]
+        eps = [dict(id=f"{PREFIX}{i + 1:03d}", buttons=BUTTONS, rounds=done[i]) for i in range(k)]
         (ROOT / "episodes/episodes.json").write_text(json.dumps(eps, ensure_ascii=False, indent=1))
         return eps
 
@@ -365,7 +402,7 @@ def main(count=300, seed=20261028, jobs=8):
         for i, r in pool.imap_unordered(numbered, todo):
             done[i] = r
             eps = save()
-            print(f"  Q{i + 1:03d} 끝 — {len(done)}/{count}, 앞에서부터 {len(eps)} 개 저장, {time.time() - t0:.0f} 초",
+            print(f"  {PREFIX}{i + 1:03d} 끝 — {len(done)}/{count}, 앞에서부터 {len(eps)} 개 저장, {time.time() - t0:.0f} 초",
                   flush=True)
     rs = [r for e in eps for r in e["rounds"]]
     sw = [r for e in eps for r in e["rounds"][1:]]
